@@ -3,12 +3,14 @@ const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const { MongoClient } = require('mongodb');
+const Tesseract = require('tesseract.js'); // For image OCR
+const axios = require('axios'); // For making API requests
 
 // Initialize Express app
 const app = express();
 const port = process.env.PORT || 3000;
 
-// MongoDB connection URL
+// MongoDB connection details
 const mongoUrl = process.env.MONGO_URL || "mongodb+srv://GroupE:Octane1890@backendcluster.rssjj.mongodb.net/";
 const dbName = process.env.DB_NAME || "Products"; // Database name
 let db;
@@ -25,7 +27,7 @@ async function connectToMongoDB() {
         db = client.db(dbName);
         console.log('Connected to MongoDB');
     } catch (err) {
-        console.error('Failed to connect to MongoDB:', err);
+        console.error('Failed to connect to MongoDB:', err.message);
         process.exit(1);
     }
 }
@@ -37,13 +39,13 @@ app.get('/', async (req, res) => {
         const categories = await categoriesCollection.find({}).toArray();
 
         if (!categories.length) {
-            return res.status(404).send({ error: "No categories found" });
+            return res.status(404).json({ error: "No categories found" });
         }
 
-        res.status(200).send(categories);
+        res.status(200).json(categories);
     } catch (err) {
-        console.error('Error fetching categories:', err);
-        res.status(500).send({ error: "Internal Server Error" });
+        console.error('Error fetching categories:', err.message);
+        res.status(500).json({ error: "Internal Server Error" });
     }
 });
 
@@ -54,61 +56,89 @@ app.get('/category/:category', async (req, res) => {
         const { name, minRating, maxRating, minPrice, maxPrice, genre, language, sortPrice } = req.query;
 
         if (!category) {
-            return res.status(400).send({ error: "Category query parameter is required" });
+            return res.status(400).json({ error: "Category is required" });
         }
 
-        // Access the collection for the specified category
         const collection = db.collection(category.trim());
-
-        // Build the query object
         const query = {};
 
-        // Add name search filter
-        if (name) {
-            query.title = { $regex: name.trim(), $options: 'i' }; // Case-insensitive regex for partial matching
-        }
-
-        // Add rating filters if provided
+        // Filters
+        if (name) query.title = { $regex: name.trim(), $options: 'i' };
         if (minRating) query.rating = { ...query.rating, $gte: parseFloat(minRating) };
         if (maxRating) query.rating = { ...query.rating, $lte: parseFloat(maxRating) };
-
-        // Add price filters if provided
         if (minPrice) query.price = { ...query.price, $gte: parseFloat(minPrice) };
         if (maxPrice) query.price = { ...query.price, $lte: parseFloat(maxPrice) };
+        if (genre) query.genres = { $in: genre.split(',').map(g => g.trim()) };
+        if (language) query.language = { $in: language.split(',').map(l => l.trim()) };
 
-        // Add genre filter
-        if (genre) {
-            const genres = genre.split(',').map(g => g.trim()); // Split by comma and trim spaces
-            query.genres = { $in: genres }; // Match any of the genres
-        }
-
-        // Add language filter
-        if (language) {
-            const languages = language.split(',').map(l => l.trim()); // Split by comma and trim spaces
-            query.language = { $in: languages }; // Match any of the languages
-        }
-
-        // Log the query for debugging
-        console.log("Generated Query:", query);
-
-        // Build the sort object for price
         const sortOptions = {};
-        if (sortPrice) {
-            sortOptions.price = sortPrice === 'asc' ? 1 : -1;
-        }
+        if (sortPrice) sortOptions.price = sortPrice === 'asc' ? 1 : -1;
 
-        // Fetch products matching the query and sorting
         const products = await collection.find(query).sort(sortOptions).toArray();
 
         if (!products.length) {
-            console.error(`No products found for query:`, query);
-            return res.status(404).send({ error: `No products found in category ${category} with the given criteria`, query });
+            return res.status(404).json({ error: `No products found in category ${category} with the given criteria`, query });
         }
 
-        res.status(200).send(products);
+        res.status(200).json(products);
     } catch (err) {
-        console.error('Error fetching category products:', err);
-        res.status(500).send({ error: "Internal Server Error" });
+        console.error('Error fetching category products:', err.message);
+        res.status(500).json({ error: "Internal Server Error" });
+    }
+});
+
+// Dynamic genre categorization for recommendations
+app.post('/recommendations', async (req, res) => {
+    try {
+        const { genres } = req.body;
+
+        if (!genres || !Array.isArray(genres) || genres.length === 0) {
+            return res.status(400).json({ error: "Genres must be a non-empty array" });
+        }
+
+        const productsCollection = db.collection('Books'); // Assuming a general 'Books' collection
+        const recommendations = await productsCollection
+            .find({ genres: { $in: genres } })
+            .limit(4) // Limit to top 4 recommendations
+            .toArray();
+
+        res.status(200).json(recommendations);
+    } catch (err) {
+        console.error('Error fetching recommendations:', err.message);
+        res.status(500).json({ error: "Internal Server Error" });
+    }
+});
+
+// Chatbot API
+app.post('/api/chat', async (req, res) => {
+    const { message, image } = req.body;
+
+    if (image) {
+        // Handle Image Search (OCR)
+        try {
+            const result = await Tesseract.recognize(image, 'eng');
+            const detectedText = result.data.text;
+            res.json({ type: 'text', text: `Detected text from image: ${detectedText}` });
+        } catch (error) {
+            console.error('Error processing image:', error);
+            res.status(500).json({ type: 'text', text: 'Failed to process the image.' });
+        }
+    } else if (message) {
+        // Handle Text-Based Queries
+        if (message.toLowerCase().includes('category')) {
+            const queryCategory = message.split(' ').slice(1).join(' ');
+            try {
+                const response = await axios.get(`https://aqueous-tiaga-699bfea4a0d8.herokuapp.com/category/${queryCategory}`);
+                res.json({ type: 'text', text: `Books found: ${response.data.map(book => book.title).join(', ')}` });
+            } 
+            catch (err) {
+                res.json({ type: 'text', text: 'Failed to fetch data for the category.' });
+            }
+        } else {
+            res.json({ type: 'text', text: 'We are in the development phase for this feature.' });
+        }
+    } else {
+        res.status(400).json({ error: 'Invalid request. Please provide a message or image.' });
     }
 });
 
