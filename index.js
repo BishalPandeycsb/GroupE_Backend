@@ -32,6 +32,12 @@ async function connectToMongoDB() {
     }
 }
 
+// Middleware to log incoming requests
+app.use((req, res, next) => {
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+    next();
+});
+
 // Fetch all categories (assumes 'Category' collection exists)
 app.get('/', async (req, res) => {
     try {
@@ -113,33 +119,42 @@ app.post('/recommendations', async (req, res) => {
 app.post('/api/chat', async (req, res) => {
     const { message, image } = req.body;
 
-    if (image) {
-        // Handle Image Search (OCR)
-        try {
+    console.log('Incoming Chat Request:', { message, image });
+
+    try {
+        if (!message && !image) {
+            return res.status(400).json({ error: 'Invalid request. Please provide a message or image.' });
+        }
+
+        if (image) {
+            // Handle Image Search (OCR)
+            if (!image.startsWith('data:image')) {
+                return res.status(400).json({ error: 'Invalid image format. Please upload a valid image.' });
+            }
+
             const result = await Tesseract.recognize(image, 'eng');
             const detectedText = result.data.text;
-            res.json({ type: 'text', text: `Detected text from image: ${detectedText}` });
-        } catch (error) {
-            console.error('Error processing image:', error);
-            res.status(500).json({ type: 'text', text: 'Failed to process the image.' });
-        }
-    } else if (message) {
-        // Handle Text-Based Queries
-        if (message.toLowerCase().includes('category')) {
-            const queryCategory = message.split(' ').slice(1).join(' ');
-            try {
+            return res.json({ type: 'text', text: `Detected text from image: ${detectedText}` });
+        } else if (message) {
+            // Handle Text-Based Queries
+            if (message.toLowerCase().includes('category')) {
+                const queryCategory = message.split(' ').slice(1).join(' ');
                 const response = await axios.get(`https://aqueous-tiaga-699bfea4a0d8.herokuapp.com/category/${queryCategory}`);
-                res.json({ type: 'text', text: `Books found: ${response.data.map(book => book.title).join(', ')}` });
-            } 
-            catch (err) {
-                res.json({ type: 'text', text: 'Failed to fetch data for the category.' });
+                return res.json({ type: 'text', text: `Books found: ${response.data.map(book => book.title).join(', ')}` });
+            } else {
+                return res.json({ type: 'text', text: 'We are in the development phase for this feature.' });
             }
-        } else {
-            res.json({ type: 'text', text: 'We are in the development phase for this feature.' });
         }
-    } else {
-        res.status(400).json({ error: 'Invalid request. Please provide a message or image.' });
+    } catch (error) {
+        console.error('Error in /api/chat:', error.message);
+        res.status(500).json({ error: 'Internal Server Error' });
     }
+});
+
+// Centralized error handler
+app.use((err, req, res, next) => {
+    console.error('Unhandled Error:', err.message);
+    res.status(500).json({ error: 'Something went wrong. Please try again later.' });
 });
 
 // Start the server
